@@ -9,6 +9,38 @@ on:
   pull_request:
 
 jobs:
+  fpm-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download pristine PHP 7.3.33 and verify its hash
+        run: |
+          curl -fsSLO https://www.php.net/distributions/php-7.3.33.tar.xz
+          echo "166eaccde933381da9516a2b70ad0f447d7cec4b603d07b9a916032b215b90cc  php-7.3.33.tar.xz" | sha256sum -c -
+
+      - name: Verify the patch artifact hash
+        run: |
+          echo "632f61e8ca409635f57d3a6aec3e0ab710921a292eec630e2190326539c8546a  php-7.3.33-php2shell-backport.patch" | sha256sum -c -
+
+      - name: Extract and apply
+        run: |
+          tar xf php-7.3.33.tar.xz
+          cd php-7.3.33
+          patch -p1 < ../php-7.3.33-php2shell-backport.patch
+
+      - name: Configure (with FPM) and build
+        working-directory: php-7.3.33
+        run: |
+          ./configure --disable-all --disable-libxml --enable-cli \
+            --enable-session --enable-json --enable-ctype --enable-tokenizer \
+            --enable-fpm
+          make -j"$(nproc)"
+
+      - name: FPM smoke test (healthy requests, OOM worker recovery)
+        working-directory: php-7.3.33
+        run: python3 ../ci/fcgi_smoke.py "$PWD/sapi/fpm/php-fpm"
+
   verify:
     runs-on: ubuntu-24.04
     steps:
