@@ -101,6 +101,10 @@ dry-applies and applies the patch to a pristine tarball, builds it,
 runs runtime assertions, and compares the Zend + session test failures
 against `ci/expected-failures.txt` (the 9 known results documented in
 BUILD-AND-VERIFY.md).
+A second CI job runs an automated FPM smoke test (`ci/fcgi_smoke.py`):
+healthy requests with fresh state, then a memory-exhaustion request,
+verifying the FPM master survives and later requests stay clean — a
+small automated subset of `FPM-VALIDATION.md`.
 
 ## License
 
