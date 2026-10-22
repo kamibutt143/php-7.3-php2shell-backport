@@ -105,6 +105,20 @@ A second CI job runs an automated FPM smoke test (`ci/fcgi_smoke.py`):
 healthy requests with fresh state, then a memory-exhaustion request,
 verifying the FPM master survives and later requests stay clean — a
 small automated subset of `FPM-VALIDATION.md`.
+A third CI job runs an Apache mod_php smoke test
+(`ci/apache_smoke.py`): it builds PHP with `--with-apxs2`, starts a
+throwaway httpd (prefork MPM) loading only the built module, and runs
+HTTP checks — runtime identity (`apache2handler`, 7.3.33, patched
+INI), request correctness, multipart-limit enforcement, and child
+process recovery. See `APACHE-VALIDATION.md`.
+
+Runtime validation at a glance:
+
+| Runtime | Validation |
+|---|---|
+| PHP CLI | Regression tests |
+| PHP-FPM | FastCGI smoke tests |
+| Apache mod_php | HTTP smoke tests |
 
 ## License
 
