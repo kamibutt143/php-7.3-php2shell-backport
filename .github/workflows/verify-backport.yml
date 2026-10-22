@@ -41,6 +41,61 @@ jobs:
         working-directory: php-7.3.33
         run: python3 ../ci/fcgi_smoke.py "$PWD/sapi/fpm/php-fpm"
 
+  apache-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download pristine PHP 7.3.33 and verify its hash
+        run: |
+          curl -fsSLO https://www.php.net/distributions/php-7.3.33.tar.xz
+          echo "166eaccde933381da9516a2b70ad0f447d7cec4b603d07b9a916032b215b90cc  php-7.3.33.tar.xz" | sha256sum -c -
+
+      - name: Verify the patch artifact hash
+        run: |
+          echo "632f61e8ca409635f57d3a6aec3e0ab710921a292eec630e2190326539c8546a  php-7.3.33-php2shell-backport.patch" | sha256sum -c -
+
+      - name: Extract and apply
+        run: |
+          tar xf php-7.3.33.tar.xz
+          cd php-7.3.33
+          patch -p1 < ../php-7.3.33-php2shell-backport.patch
+          test -z "$(find . -name '*.rej' -print -quit)"
+
+      # Apache + headers for --with-apxs2. apache2-dev provides apxs2 and
+      # the APR development files. The system Apache configuration in
+      # /etc/apache2 is never used: the smoke script starts httpd with a
+      # fully temporary config and loads only the module built here.
+      - name: Install Apache and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apache2 apache2-dev
+
+      # Non-thread-safe build (the default) -> the smoke config loads the
+      # prefork MPM; mod_php must never run under a threaded MPM with NTS.
+      - name: Configure (with mod_php via apxs2) and build
+        working-directory: php-7.3.33
+        run: |
+          ./configure --disable-all --disable-libxml --enable-cli \
+            --enable-session --enable-json --enable-ctype --enable-tokenizer \
+            --with-apxs2=/usr/bin/apxs2
+          make -j"$(nproc)"
+          test -f libs/libphp7.so
+
+      - name: Apache mod_php smoke test (HTTP identity, multipart limit, stability)
+        working-directory: php-7.3.33
+        env:
+          APACHE_SMOKE_ARTIFACT_DIR: ${{ github.workspace }}/apache-smoke-logs
+        run: python3 ../ci/apache_smoke.py /usr/sbin/apache2 "$PWD/libs/libphp7.so"
+
+      - name: Upload Apache logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apache-smoke-logs
+          path: apache-smoke-logs/
+          if-no-files-found: ignore
+
   verify:
     runs-on: ubuntu-24.04
     steps:
