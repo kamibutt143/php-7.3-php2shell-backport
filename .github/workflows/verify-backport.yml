@@ -57,6 +57,19 @@ jobs:
           # Parse the FAILED TEST SUMMARY section of the output instead.
           sapi/cli/php run-tests.php -q -P \
             Zend/tests ext/session/tests > /tmp/test-output.txt || true
+          # Guard 1: the run must have completed with a full summary —
+          # a crashed runner produces partial output, not a summary.
+          grep -q '^FAILED TEST SUMMARY' /tmp/test-output.txt || {
+            echo "::error::No FAILED TEST SUMMARY in run-tests output — test runner crashed or aborted"; exit 1; }
+          grep -q '^Tests passed' /tmp/test-output.txt || {
+            echo "::error::No test totals in run-tests output — test runner crashed or aborted"; exit 1; }
+          # Guard 2: a sane number of tests must actually have passed
+          # (baseline for this tree/config: 2727 passed).
+          passed=$(grep -oE '^Tests passed +: +[0-9]+' /tmp/test-output.txt | grep -oE '[0-9]+$')
+          echo "Tests passed: $passed"
+          [ "$passed" -ge 2700 ] || {
+            echo "::error::Only $passed tests passed (< 2700) — too few tests executed"; exit 1; }
+          # Exact known-failure comparison.
           sed -n '/^FAILED TEST SUMMARY/,/^=====/p' /tmp/test-output.txt \
             | grep -oE '\[(Zend/tests|ext/session/tests)/[^]]+\.phpt\]' \
             | tr -d '[]' | sort -u > /tmp/failed-sorted.txt
