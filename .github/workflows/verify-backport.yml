@@ -1,0 +1,60 @@
+name: verify-backport
+
+# Reproducibility check for the PHP 7.3.33 php2shell backport:
+# pristine tarball -> hash check -> patch -> build -> runtime assertions
+# -> Zend/session test suites with an exact known-failure set.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download pristine PHP 7.3.33 and verify its hash
+        run: |
+          curl -fsSLO https://www.php.net/distributions/php-7.3.33.tar.xz
+          echo "166eaccde933381da9516a2b70ad0f447d7cec4b603d07b9a916032b215b90cc  php-7.3.33.tar.xz" | sha256sum -c -
+
+      - name: Verify the patch artifact hash
+        run: |
+          echo "632f61e8ca409635f57d3a6aec3e0ab710921a292eec630e2190326539c8546a  php-7.3.33-php2shell-backport.patch" | sha256sum -c -
+
+      - name: Extract, dry-apply, apply
+        run: |
+          tar xf php-7.3.33.tar.xz
+          cd php-7.3.33
+          patch -p1 --dry-run < ../php-7.3.33-php2shell-backport.patch
+          patch -p1 < ../php-7.3.33-php2shell-backport.patch
+          test -z "$(find . -name '*.rej' -print -quit)"
+
+      - name: Configure and build
+        working-directory: php-7.3.33
+        run: |
+          ./configure --disable-all --disable-libxml --enable-cli \
+            --enable-session --enable-json --enable-ctype --enable-tokenizer
+          make -j"$(nproc)"
+
+      - name: Runtime assertions
+        working-directory: php-7.3.33
+        run: |
+          sapi/cli/php -v | grep -q "PHP 7.3.33"
+          # The fix registers max_multipart_body_parts; stock 7.3.33 returns bool(false) here.
+          sapi/cli/php -r 'exit(ini_get("max_multipart_body_parts") === "-1" ? 0 : 1);'
+          # Concat smoke test (exercises the patched VM guards' code paths).
+          sapi/cli/php -r '$a = "foo"; $a .= "bar"; $b = $a . "baz"; exit($b === "foobarbaz" ? 0 : 1);'
+          # Session extension present.
+          sapi/cli/php -m | grep -qi '^session$'
+
+      - name: Test suites — failures must match the known set exactly
+        working-directory: php-7.3.33
+        run: |
+          sapi/cli/php run-tests.php -q -P -w /tmp/failed.txt \
+            Zend/tests ext/session/tests || true
+          grep -oE '(Zend/tests|ext/session/tests)/[^ ]+\.phpt' /tmp/failed.txt \
+            | sort -u > /tmp/failed-sorted.txt
+          sort -u ../ci/expected-failures.txt > /tmp/expected-sorted.txt
+          diff /tmp/expected-sorted.txt /tmp/failed-sorted.txt
