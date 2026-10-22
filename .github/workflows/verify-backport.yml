@@ -52,9 +52,13 @@ jobs:
       - name: Test suites — failures must match the known set exactly
         working-directory: php-7.3.33
         run: |
-          sapi/cli/php run-tests.php -q -P -w /tmp/failed.txt \
-            Zend/tests ext/session/tests || true
-          grep -oE '(Zend/tests|ext/session/tests)/[^ ]+\.phpt' /tmp/failed.txt \
-            | sort -u > /tmp/failed-sorted.txt
+          # NOTE: do not use run-tests.php -w here — in PHP 7.3 it also
+          # lists the XFAIL (expected-fail) tests, not just real failures.
+          # Parse the FAILED TEST SUMMARY section of the output instead.
+          sapi/cli/php run-tests.php -q -P \
+            Zend/tests ext/session/tests > /tmp/test-output.txt || true
+          sed -n '/^FAILED TEST SUMMARY/,/^=====/p' /tmp/test-output.txt \
+            | grep -oE '\[(Zend/tests|ext/session/tests)/[^]]+\.phpt\]' \
+            | tr -d '[]' | sort -u > /tmp/failed-sorted.txt
           sort -u ../ci/expected-failures.txt > /tmp/expected-sorted.txt
           diff /tmp/expected-sorted.txt /tmp/failed-sorted.txt
