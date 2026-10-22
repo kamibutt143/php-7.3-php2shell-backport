@@ -54,6 +54,7 @@ cd /usr/local/src
 curl -LO https://www.php.net/distributions/php-7.3.33.tar.xz
 echo "166eaccde933381da9516a2b70ad0f447d7cec4b603d07b9a916032b215b90cc  php-7.3.33.tar.xz" | sha256sum -c -
 curl -LO https://github.com/kamibutt143/php-7.3-php2shell-backport/raw/main/php-7.3.33-php2shell-backport.patch
+echo "632f61e8ca409635f57d3a6aec3e0ab710921a292eec630e2190326539c8546a  php-7.3.33-php2shell-backport.patch" | sha256sum -c -
 tar xf php-7.3.33.tar.xz && cd php-7.3.33
 
 # 2. Apply the patch (must complete with no FAILED hunks / no .rej files)
@@ -62,7 +63,9 @@ find . -name '*.rej' | grep . && echo "STOP: rejects present" || echo "patch cle
 
 # 3. Configure: reuse YOUR current build's own flags, change only the prefix
 php-config --configure-options        # review these — this is your baseline
-./configure $(php-config --configure-options) --prefix=/opt/php73-patched
+# Preserve the options EXACTLY (bare $(...) word-splits quoted arguments):
+eval "CONF_OPTS=($(php-config --configure-options))"
+./configure "${CONF_OPTS[@]}" --prefix=/opt/php73-patched
 #    For mod_php also keep: --with-apxs2=/usr/bin/apxs2 (Debian path)
 #    and your existing --with-config-file-path / --with-config-file-scan-dir
 #    so the patched build reads the same php.ini / conf.d as production.
@@ -124,8 +127,11 @@ itself carries (`docker-php-source`).
 ### B1. Debian variants (`php:7.3.33-fpm`, `-cli`, `-apache`)
 
 ```dockerfile
-# Keep your existing base image line; pin the exact 7.3.33 tag.
-FROM php:7.3.33-fpm
+# Pin the base image by digest, not just by tag (tags are mutable).
+# Digest shown is the amd64 manifest of php:7.3.33-fpm; for another
+# architecture get yours from:
+#   docker buildx imagetools inspect php:7.3.33-fpm
+FROM php:7.3.33-fpm@sha256:09f7ea00daaa3b9cae2e5951b975de4dabf85357ffd707739c1779cd6dfec82a
 
 # 1. This repo's patch file must sit next to the Dockerfile,
 #    or download it in the build instead (next line, commented).
@@ -137,10 +143,11 @@ COPY php-7.3.33-php2shell-backport.patch /tmp/backport.patch
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends patch $PHPIZE_DEPS; \
+    echo "632f61e8ca409635f57d3a6aec3e0ab710921a292eec630e2190326539c8546a  /tmp/backport.patch" | sha256sum -c -; \
     docker-php-source extract; \
     cd /usr/src/php; \
     patch -p1 < /tmp/backport.patch; \
-    ./configure $(php-config --configure-options); \
+    eval "set -- $(php-config --configure-options)"; ./configure "$@"; \
     make -j"$(nproc)"; \
     make install; \
     cd /; docker-php-source delete; \
@@ -170,10 +177,11 @@ Same shape; swap the package steps:
 RUN set -eux; \
     apk add --no-cache patch; \
     apk add --no-cache --virtual .build-deps $PHPIZE_DEPS; \
+    echo "632f61e8ca409635f57d3a6aec3e0ab710921a292eec630e2190326539c8546a  /tmp/backport.patch" | sha256sum -c -; \
     docker-php-source extract; \
     cd /usr/src/php; \
     patch -p1 < /tmp/backport.patch; \
-    ./configure $(php-config --configure-options); \
+    eval "set -- $(php-config --configure-options)"; ./configure "$@"; \
     make -j"$(nproc)"; make install; \
     cd /; docker-php-source delete; \
     apk del .build-deps
