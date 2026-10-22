@@ -312,27 +312,42 @@ php_admin_value upload_max_filesize 2M
     except Exception as e:  # fail closed with diagnostics
         print('ERROR', e)
         failures.append(f'exception: {e}')
-    finally:
+
+    # Diagnostics and the summary are emitted BEFORE shutdown: in CI the
+    # step died with SIGTERM (exit 143) during shutdown cleanup, after
+    # all checks had passed but before the summary printed, which made
+    # a fully-passing run report as a failure. Print first, stop after.
+    if failures and os.path.exists(errlog):
+        print('--- apache error.log (tail) ---')
+        with open(errlog, errors='replace') as f:
+            print(''.join(f.readlines()[-40:]))
+        dest = os.environ.get('APACHE_SMOKE_ARTIFACT_DIR')
+        if dest:
+            os.makedirs(dest, exist_ok=True)
+            shutil.copy(errlog, os.path.join(dest, 'apache-error.log'))
+            shutil.copy(conf, os.path.join(dest, 'httpd.conf'))
+    print('APACHE SMOKE:', 'FAIL ' + ', '.join(failures) if failures else 'PASS', flush=True)
+    result = 1 if failures else 0
+
+    # Stop the master directly with a signal to the pidfile pid (an
+    # earlier version used `httpd -k stop`, which re-parses the config
+    # in a fresh process — an unnecessary moving part at this point).
+    try:
+        master = int(open(pidfile).read().strip())
+        os.kill(master, signal.SIGTERM)
+    except Exception:
         try:
-            subprocess.run([httpd, '-f', conf, '-k', 'stop'], timeout=15,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc.terminate()
         except Exception:
             pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:
         try:
-            proc.wait(timeout=10)
-        except Exception:
             proc.kill()
-        if failures and os.path.exists(errlog):
-            print('--- apache error.log (tail) ---')
-            with open(errlog, errors='replace') as f:
-                print(''.join(f.readlines()[-40:]))
-            dest = os.environ.get('APACHE_SMOKE_ARTIFACT_DIR')
-            if dest:
-                os.makedirs(dest, exist_ok=True)
-                shutil.copy(errlog, os.path.join(dest, 'apache-error.log'))
-                shutil.copy(conf, os.path.join(dest, 'httpd.conf'))
-    print('APACHE SMOKE:', 'FAIL ' + ', '.join(failures) if failures else 'PASS', flush=True)
-    sys.exit(1 if failures else 0)
+        except Exception:
+            pass
+    sys.exit(result)
 
 if __name__ == '__main__':
     main()
