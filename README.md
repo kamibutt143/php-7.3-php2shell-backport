@@ -31,6 +31,11 @@ The 7.3 port, adaptations, build and verification are by
 
 ## Use
 
+Full step-by-step for **VM / bare metal / EC2** and for **Docker**
+(side-by-side build, swap, verification, rollback):
+**[PATCHING.md](PATCHING.md)**
+
+
 ```sh
 # on a pristine php-7.3.33 source tree:
 patch -p1 < php-7.3.33-php2shell-backport.patch
