@@ -215,8 +215,15 @@ php_admin_value upload_max_filesize 2M
             failures.append(name)
 
     httpd_out = open(os.path.join(work, 'httpd-stdout.log'), 'wb')
+    # start_new_session: httpd MUST live in its own session/process group.
+    # On SIGTERM the prefork master signals its ENTIRE process group
+    # (strace-captured: kill(-pgid, SIGTERM)) before exiting. In the
+    # caller's group that collateral-kills this script and the invoking
+    # shell (CI step exit 143 despite all checks passing). Isolated in
+    # its own group, the broadcast can only reach Apache processes.
     proc = subprocess.Popen([httpd, '-f', conf, '-DFOREGROUND'],
-                            stdout=httpd_out, stderr=subprocess.STDOUT)
+                            stdout=httpd_out, stderr=subprocess.STDOUT,
+                            start_new_session=True)
     try:
         # --- startup: wait for the port, fail closed if httpd dies ---
         up = False
@@ -329,13 +336,26 @@ php_admin_value upload_max_filesize 2M
     print('APACHE SMOKE:', 'FAIL ' + ', '.join(failures) if failures else 'PASS', flush=True)
     result = 1 if failures else 0
 
-    # Stop the master directly with a signal to the pidfile pid (an
-    # earlier version used `httpd -k stop`, which re-parses the config
-    # in a fresh process — an unnecessary moving part at this point).
+    # Stop ONLY the Apache tree, with bounded waits. The master was
+    # started in its own session, so its process group contains Apache
+    # processes exclusively (see the Popen call above): SIGTERM the
+    # master pid, wait, and only if it survives escalate to SIGKILL
+    # against that Apache-only group — never our own group. (An earlier
+    # version used `httpd -k stop`, which re-parses the config in a
+    # fresh process — an unnecessary moving part at this point.)
+    master = None
+    master_pgid = None
     try:
         master = int(open(pidfile).read().strip())
-        os.kill(master, signal.SIGTERM)
+        master_pgid = os.getpgid(master)
     except Exception:
+        master, master_pgid = None, None
+    if master is not None:
+        try:
+            os.kill(master, signal.SIGTERM)
+        except Exception:
+            pass
+    else:
         try:
             proc.terminate()
         except Exception:
@@ -343,8 +363,13 @@ php_admin_value upload_max_filesize 2M
     try:
         proc.wait(timeout=10)
     except Exception:
+        if master_pgid is not None and master_pgid != os.getpgrp():
+            try:
+                os.killpg(master_pgid, signal.SIGKILL)
+            except Exception:
+                pass
         try:
-            proc.kill()
+            proc.wait(timeout=5)
         except Exception:
             pass
     sys.exit(result)
