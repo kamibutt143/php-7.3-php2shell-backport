@@ -112,7 +112,8 @@ def builtin_modules(httpd):
     except Exception:
         return set()
 
-def children_of(pid):
+def live_children_of(pid):
+    """Children of pid that are not zombies (state Z)."""
     kids = []
     for name in os.listdir('/proc'):
         if not name.isdigit():
@@ -120,11 +121,28 @@ def children_of(pid):
         try:
             with open(f'/proc/{name}/stat') as f:
                 parts = f.read().rsplit(') ', 1)[1].split()
-            if int(parts[1]) == pid:
+            if int(parts[1]) == pid and parts[0] != 'Z':
                 kids.append(int(name))
         except (OSError, IndexError, ValueError):
             continue
     return kids
+
+
+def group_members(pgid):
+    """Live (non-zombie) process ids in process group pgid."""
+    members = []
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f'/proc/{name}/stat') as f:
+                parts = f.read().rsplit(') ', 1)[1].split()
+            if int(parts[2]) == pgid and parts[0] != 'Z':
+                members.append(int(name))
+        except (OSError, IndexError, ValueError):
+            continue
+    return members
+
 
 def main():
     httpd = os.path.abspath(sys.argv[1])
@@ -180,6 +198,11 @@ def main():
     if os.geteuid() == 0:
         extra_conf = 'User nobody\nGroup nogroup\n'
     conf = os.path.join(work, 'httpd.conf')
+    # Fixture MPM tuning: MinSpareServers == StartServers (3) so that
+    # killing one worker always drops the idle count below the spare
+    # floor and the master is REQUIRED to spawn a replacement — the
+    # worker-recovery check below can then demand a new pid instead of
+    # passing vacuously when spares remain.
     with open(conf, 'w') as f:
         f.write(f"""ServerRoot {work}
 PidFile {pidfile}
@@ -189,7 +212,7 @@ Listen 127.0.0.1:{port}
 ServerName 127.0.0.1
 {load_lines()}LoadModule php7_module {php_module}
 {extra_conf}StartServers 3
-MinSpareServers 2
+MinSpareServers 3
 MaxSpareServers 4
 ServerLimit 6
 MaxRequestWorkers 6
@@ -294,22 +317,39 @@ php_admin_value upload_max_filesize 2M
         check('malformed multipart: answered, server healthy after',
               st is not None and st2 == 200 and 'hits=1' in body2, f'status={st}')
 
-        # kill one prefork child; master must replace it and stay up
+        # --- worker recovery: kill exactly one prefork worker; the
+        # master must stay alive and spawn a replacement with a NEW pid.
+        # Every stage is a hard check: no workers, a dead master, or an
+        # unconfirmed replacement FAILS the run — never a silent skip.
         master_pid = int(open(pidfile).read().strip())
-        kids = children_of(master_pid)
-        if kids:
-            os.kill(kids[0], signal.SIGKILL)
-            time.sleep(1.0)
+        before = live_children_of(master_pid)
+        check('prefork workers present (recovery precondition)',
+              len(before) >= 1, f'workers={before}')
+        if before:
+            victim = before[0]
+            os.kill(victim, signal.SIGKILL)
+            replacement = None
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                new = [p for p in live_children_of(master_pid) if p not in before]
+                if new:
+                    replacement = new[0]
+                    break
+                time.sleep(0.25)
             try:
                 os.kill(master_pid, 0)
-                alive = True
+                master_alive = True
             except OSError:
-                alive = False
+                master_alive = False
+            check('master alive after worker kill', master_alive,
+                  f'master={master_pid} killed={victim}')
+            check('replacement worker with new pid within 15s',
+                  replacement is not None,
+                  f'before={before} replacement={replacement}')
             st, body = fetch(port, 'GET', '/hello.php')
-            check('prefork child killed: master alive, requests clean',
-                  alive and st == 200 and 'hits=1' in body, f'killed child {kids[0]}')
-        else:
-            print('INFO no prefork children found; child-recovery check skipped', flush=True)
+            check('requests clean after worker recovery',
+                  st == 200 and 'hits=1' in body and 'SMOKE_OK' in body,
+                  f'-> {body.strip()[:60]!r}')
 
         ok = True
         for _ in range(3):
@@ -336,13 +376,17 @@ php_admin_value upload_max_filesize 2M
     print('APACHE SMOKE:', 'FAIL ' + ', '.join(failures) if failures else 'PASS', flush=True)
     result = 1 if failures else 0
 
-    # Stop ONLY the Apache tree, with bounded waits. The master was
-    # started in its own session, so its process group contains Apache
-    # processes exclusively (see the Popen call above): SIGTERM the
-    # master pid, wait, and only if it survives escalate to SIGKILL
-    # against that Apache-only group — never our own group. (An earlier
-    # version used `httpd -k stop`, which re-parses the config in a
-    # fresh process — an unnecessary moving part at this point.)
+    # Stop ONLY the Apache tree, with bounded waits, then verify the
+    # whole tree is actually gone. The master was started in its own
+    # session, so its process group contains Apache processes
+    # exclusively (see the Popen call above): SIGTERM the master pid,
+    # wait, and escalate to SIGKILL against that Apache-only group if
+    # anything survives — never our own group. (An earlier version
+    # used `httpd -k stop`, which re-parses the config in a fresh
+    # process — an unnecessary moving part at this point.)
+    # Cleanup never masks the test outcome: `result` above already
+    # reflects the checks, and a cleanup failure below can only turn a
+    # pass into a fail (with diagnostics), never the reverse.
     master = None
     master_pgid = None
     try:
@@ -368,10 +412,48 @@ php_admin_value upload_max_filesize 2M
                 os.killpg(master_pgid, signal.SIGKILL)
             except Exception:
                 pass
+        else:
+            try:
+                proc.kill()
+            except Exception:
+                pass
         try:
             proc.wait(timeout=5)
         except Exception:
             pass
+    # Verify no Apache process survives in the group (bounded drain +
+    # one group-confined SIGKILL escalation + re-check).
+    survivors = []
+    if master_pgid is not None and master_pgid != os.getpgrp():
+        deadline = time.time() + 5
+        survivors = group_members(master_pgid)
+        while survivors and time.time() < deadline:
+            time.sleep(0.25)
+            survivors = group_members(master_pgid)
+        if survivors:
+            try:
+                os.killpg(master_pgid, signal.SIGKILL)
+            except Exception:
+                pass
+            deadline = time.time() + 5
+            while survivors and time.time() < deadline:
+                time.sleep(0.25)
+                survivors = group_members(master_pgid)
+    if survivors:
+        result = 1
+        print('FAIL apache shutdown cleanup: processes survived:',
+              survivors, flush=True)
+        for pid in survivors:
+            try:
+                with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                    cmd = f.read().replace(b'\0', b' ').decode(errors='replace')
+                print(f'  survivor pid={pid} cmd={cmd}', flush=True)
+            except OSError:
+                print(f'  survivor pid={pid} (cmdline unreadable)', flush=True)
+        if os.path.exists(errlog):
+            print('--- apache error.log (tail) ---')
+            with open(errlog, errors='replace') as f:
+                print(''.join(f.readlines()[-40:]))
     sys.exit(result)
 
 if __name__ == '__main__':
