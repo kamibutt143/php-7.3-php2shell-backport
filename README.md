@@ -7,7 +7,10 @@ to **PHP 7.3.33**, the last PHP 7.3 release.
 
 PHP 7.3 is end-of-life: upstream published fixed releases only for
 8.2–8.5, and minimal backport branches only for 7.4, 8.0 and 8.1.
-**Nothing exists for 7.3 — this repository is that missing backport.**
+**The PHP project has not published an official PHP 7.3 backport; this
+repository provides an independent community port for PHP 7.3.33.**
+(Distributions and LTS vendors may offer their own 7.3 patches — the
+PHP advisory recommends checking with your vendor first.)
 
 > ⚠️ Not an official PHP release. Not affiliated with or endorsed by the
 > PHP Group. Upgrading to a supported PHP (8.3+) remains the strategic fix;
@@ -84,6 +87,20 @@ Any application feature relying on **session upload progress**
 the official fix, on 7.4/8.0 as well. Everything else is unchanged.
 Keep `session.upload_progress.enabled=0` in production config as
 defense in depth.
+
+## Artifact verification
+
+```text
+php-7.3.33.tar.xz (php.net, input):
+  sha256 166eaccde933381da9516a2b70ad0f447d7cec4b603d07b9a916032b215b90cc
+php-7.3.33-php2shell-backport.patch (this repo):
+  sha256 632f61e8ca409635f57d3a6aec3e0ab710921a292eec630e2190326539c8546a
+```
+CI (`.github/workflows/verify-backport.yml`) re-checks both hashes,
+dry-applies and applies the patch to a pristine tarball, builds it,
+runs runtime assertions, and compares the Zend + session test failures
+against `ci/expected-failures.txt` (the 9 known results documented in
+BUILD-AND-VERIFY.md).
 
 ## License
 
